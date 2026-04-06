@@ -5,10 +5,23 @@
 # OR copy this file:  cp docker-compose.override.yml.example docker-compose.override.yml
 #
 # DO NOT commit docker-compose.override.yml  (it is in .gitignore).
+#
+# Connecting the Flutter app to this backend:
+#
+#   Platform               Homeserver URL to enter in app
+#   ─────────────────────  ───────────────────────────────────────────────────
+#   Flutter web (browser)  http://localhost:8008
+#   iOS Simulator          http://localhost:8008
+#   Android Emulator       http://10.0.2.2:8008
+#   Physical device        http://<YOUR_MACHINE_LAN_IP>:8008
+#                           e.g. http://192.168.1.50:8008
+#                           (run: ipconfig getifaddr en0   to find your LAN IP)
+#                           Requires changing 127.0.0.1 → 0.0.0.0 in ports below.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
-  # Expose Synapse directly on localhost — no reverse proxy needed locally
+  # Expose Synapse directly on localhost — no reverse proxy needed locally.
+  # For physical device testing change "127.0.0.1:8008:8008" → "0.0.0.0:8008:8008"
   synapse:
     ports:
       - "127.0.0.1:8008:8008"
