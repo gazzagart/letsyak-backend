@@ -1,0 +1,52 @@
+# docker-compose.override.yml.example
+# ─────────────────────────────────────────────────────────────────────────────
+# Template for local development.
+# Run  ./setup.sh --local  to auto-generate this as docker-compose.override.yml,
+# OR copy this file:  cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# DO NOT commit docker-compose.override.yml  (it is in .gitignore).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # Expose Synapse directly on localhost — no reverse proxy needed locally
+  synapse:
+    ports:
+      - "127.0.0.1:8008:8008"
+
+  # Expose well-known on a different port to avoid conflicts
+  well-known:
+    ports:
+      - "127.0.0.1:8080:80"
+
+  # Expose Vault API and override public URLs to use plain http://localhost
+  vault-api:
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      MINIO_PUBLIC_URL: "http://localhost:9000"
+      VAULT_PUBLIC_URL: "http://localhost:8090"
+
+  # Expose MinIO API and console
+  minio:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    command: server /data --console-address ":9001"
+
+  # TURN/STUN, push notifications, and the web container are not needed locally.
+  # Flutter runs the app directly; push notifications require real device tokens.
+  coturn:
+    profiles: ["disabled"]
+
+  sygnal:
+    profiles: ["disabled"]
+
+  letsyak-web:
+    profiles: ["disabled"]
+
+networks:
+  # Replace the external proxy-network with a local bridge.
+  # This lets Docker Compose start without Nginx Proxy Manager installed.
+  proxy-network:
+    external: false
+    name: letsyak-proxy-local

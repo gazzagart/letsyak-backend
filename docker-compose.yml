@@ -1,0 +1,169 @@
+# =============================================================================
+#  LetsYak Matrix Server Stack
+#  Runs behind Nginx Proxy Manager on the proxy-network.
+#  Usage: docker compose up -d
+# =============================================================================
+
+services:
+  synapse:
+    image: matrixdotorg/synapse:latest
+    container_name: letsyak-synapse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    volumes:
+      - ./synapse:/data
+    expose:
+      - "8008"
+    networks:
+      - letsyak-internal
+      - proxy-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: letsyak-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - letsyak-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: letsyak-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - letsyak-internal
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: letsyak-coturn
+    restart: unless-stopped
+    command: ["-c", "/etc/coturn/turnserver.conf", "--no-cli"]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "49160-49200:49160-49200/udp"
+    networks:
+      - letsyak-internal
+
+  # LetsYak Web Client
+  letsyak-web:
+    image: letsyak-web:latest
+    container_name: letsyak-web
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - proxy-network
+
+  # Serves /.well-known/matrix/* responses for NPM to proxy to
+  well-known:
+    image: nginx:alpine
+    container_name: letsyak-well-known
+    restart: unless-stopped
+    volumes:
+      - ./well-known/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./well-known/www:/usr/share/nginx/html:ro
+    expose:
+      - "80"
+    networks:
+      - proxy-network
+
+  sygnal:
+    image: matrixdotorg/sygnal:latest
+    container_name: letsyak-sygnal
+    restart: unless-stopped
+    volumes:
+      - ./sygnal:/sygnal
+    environment:
+      SYGNAL_CONF: /sygnal/sygnal.yaml
+    expose:
+      - "5000"
+    networks:
+      - letsyak-internal
+      - proxy-network
+
+  vault-api:
+    build: ./vault-api
+    container_name: letsyak-vault-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      PORT: "8090"
+      DATABASE_URL: "postgres://synapse:${POSTGRES_PASSWORD}@postgres:5432/vault?sslmode=disable"
+      SYNAPSE_URL: "http://synapse:8008"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY}"
+      MINIO_SECRET_KEY: "${MINIO_SECRET_KEY}"
+      MINIO_USE_SSL: "false"
+      MINIO_PUBLIC_URL: "https://${VAULT_FILES_DOMAIN}"
+      VAULT_PUBLIC_URL: "https://${VAULT_API_DOMAIN}"
+    expose:
+      - "8090"
+    networks:
+      - letsyak-internal
+      - proxy-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: letsyak-minio
+    restart: unless-stopped
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ACCESS_KEY}"
+      MINIO_ROOT_PASSWORD: "${MINIO_SECRET_KEY}"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "9000"
+    networks:
+      - letsyak-internal
+      - proxy-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  letsyak-internal:
+    driver: bridge
+  proxy-network:
+    external: true
+    name: proxy-network

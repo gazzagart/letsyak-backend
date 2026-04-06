@@ -1,0 +1,36 @@
+http:
+  bind_addresses: ['0.0.0.0']
+  port: 5000
+
+log:
+  setup:
+    version: 1
+    formatters:
+      normal:
+        format: "%(asctime)s [%(process)d] %(levelname)-5s %(name)s %(message)s"
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: normal
+    loggers:
+      sygnal:
+        handlers: [console]
+        level: INFO
+    root:
+      level: WARNING
+    disable_existing_loggers: false
+
+apps:
+  # Android push — FluffyChat appends .data_message suffix for FCM data messages
+  com.letsyak.app.data_message:
+    type: gcm
+    api_version: v1
+    project_id: let-s-yak
+    service_account_file: /sygnal/firebase-service-account.json
+
+  # Web push — uses the base app ID without suffix
+  com.letsyak.app:
+    type: gcm
+    api_version: v1
+    project_id: let-s-yak
+    service_account_file: /sygnal/firebase-service-account.json
