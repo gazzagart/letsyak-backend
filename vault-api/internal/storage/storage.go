@@ -30,10 +30,15 @@ type FileInfo struct {
 
 // New creates a new MinIO storage client.
 // publicBaseURL is the externally-reachable base URL for MinIO (e.g.
-// "https://vault-files.example.com"). A separate presigner client is created
-// with this endpoint so that presigned URLs have signatures matching the public
-// Host header the browser sends via the reverse proxy. If empty, the internal
-// client is used for both (useful for local development).
+// "https://vault-files.example.com" or "http://localhost:9000").
+//
+// A separate presigner client is created that points directly at the public
+// endpoint so that presigned URLs contain the public hostname in their host
+// component — which must match the Host header the browser sends, since Host
+// is always included in the AWS v4 signature. We set Region explicitly on
+// the presigner so the SDK never makes a GetBucketLocation network call
+// (which would fail if the public endpoint is unreachable from inside the
+// container). If publicBaseURL is empty the internal client is used for both.
 func New(endpoint, accessKey, secretKey string, useSSL bool, publicBaseURL string) (*Client, error) {
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -43,16 +48,23 @@ func New(endpoint, accessKey, secretKey string, useSSL bool, publicBaseURL strin
 		return nil, fmt.Errorf("create minio client: %w", err)
 	}
 
-	// Default: use the same client for presigning (local dev).
 	presigner := mc
 	if publicBaseURL != "" {
 		u, err := url.Parse(strings.TrimRight(publicBaseURL, "/"))
 		if err != nil {
 			return nil, fmt.Errorf("parse public base URL: %w", err)
 		}
+		// Region is hardcoded to "us-east-1" — MinIO's default — to prevent
+		// the SDK from making a GetBucketLocation HTTP call before signing.
+		// Without it, the SDK tries to resolve the region by contacting the
+		// presigner endpoint, which fails when that endpoint (e.g.
+		// localhost:9000) is unreachable from inside the Docker container.
+		// This value is not location-sensitive; it is just a label in the
+		// AWS v4 credential scope string and must match on both sides.
 		presigner, err = minio.New(u.Host, &minio.Options{
 			Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 			Secure: u.Scheme == "https",
+			Region: "us-east-1",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create presigner client: %w", err)

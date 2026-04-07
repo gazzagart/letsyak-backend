@@ -371,6 +371,9 @@ services:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     command: server /data --console-address ":9001"
+    environment:
+      # Allow browser uploads from any localhost origin (local dev only)
+      MINIO_API_CORS_ALLOW_ORIGIN: "http://localhost:*"
 
   coturn:
     profiles: ["disabled"]
