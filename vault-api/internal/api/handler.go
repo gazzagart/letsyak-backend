@@ -2,9 +2,14 @@ package api
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
+	"fmt"
+	"html/template"
 	"log"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +20,30 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+//go:embed templates
+var templateFS embed.FS
+
+var sharePageTmpl = template.Must(
+	template.New("share.html").ParseFS(templateFS, "templates/share.html"),
+)
+
+// SharePageData is the data passed to the share landing page template.
+type SharePageData struct {
+	ShareID     string
+	FileName    string
+	FileSize    string
+	MIMEType    string
+	FileEmoji   string
+	OwnerID     string
+	HasExpiry   bool
+	ExpiresAt   string
+	HasPassword bool
+	IsImage     bool
+	IsVideo     bool
+	IsAudio     bool
+	IsRoomShare bool
+}
 
 type contextKey string
 
@@ -253,11 +282,17 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 			log.Printf("DeletePrefix error for %s: %v", userID, err)
 			return
 		}
+		if err := h.db.RevokeSharesByObjectPrefix(userID, path); err != nil {
+			log.Printf("RevokeSharesByObjectPrefix error for %s %s: %v", userID, path, err)
+		}
 	} else {
 		if err := h.store.DeleteObject(r.Context(), user.BucketName, path); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete file")
 			log.Printf("DeleteObject error for %s: %v", userID, err)
 			return
+		}
+		if err := h.db.RevokeSharesByObjectKey(userID, path); err != nil {
+			log.Printf("RevokeSharesByObjectKey error for %s %s: %v", userID, path, err)
 		}
 	}
 
@@ -289,6 +324,9 @@ func (h *Handler) MoveFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to move file")
 		log.Printf("MoveObject error for %s: %v", userID, err)
 		return
+	}
+	if err := h.db.UpdateSharesObjectKey(userID, req.From, req.To, filepath.Base(req.To)); err != nil {
+		log.Printf("UpdateSharesObjectKey error for %s %s -> %s: %v", userID, req.From, req.To, err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -360,9 +398,12 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"share_id":      share.ShareID,
+		"object_key":    share.ObjectKey,
 		"file_name":     share.FileName,
 		"file_size":     share.FileSize,
+		"mime_type":     share.MIMEType,
 		"vault_url":     vaultURL,
+		"share_type":    share.ShareType,
 		"owner_user_id": userID,
 		"target_id":     share.TargetID,
 		"expires_at":    share.ExpiresAt,
@@ -389,8 +430,10 @@ func (h *Handler) GetShare(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"share_id":      share.ShareID,
+		"object_key":    share.ObjectKey,
 		"file_name":     share.FileName,
 		"file_size":     share.FileSize,
+		"mime_type":     share.MIMEType,
 		"owner_user_id": share.OwnerUserID,
 		"share_type":    share.ShareType,
 		"target_id":     share.TargetID,
@@ -477,21 +520,113 @@ func (h *Handler) ListMyShares(w http.ResponseWriter, r *http.Request) {
 	for _, s := range shares {
 		result = append(result, map[string]interface{}{
 			"share_id":       s.ShareID,
+			"object_key":     s.ObjectKey,
 			"file_name":      s.FileName,
 			"file_size":      s.FileSize,
+			"mime_type":      s.MIMEType,
 			"vault_url":      h.publicURL + "/share/" + s.ShareID,
+			"share_type":     s.ShareType,
 			"owner_user_id":  s.OwnerUserID,
 			"target_id":      s.TargetID,
 			"expires_at":     s.ExpiresAt,
 			"is_revoked":     s.IsRevoked,
 			"download_count": s.DownloadCount,
+			"created_at":     s.CreatedAt,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, result)
 }
 
-// PublicSharePage serves a basic download page for unauthenticated share links.
+// ListRoomShares returns all active shares targeting a specific room.
+// The caller must be a member of that room.
+func (h *Handler) ListRoomShares(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	roomID, err := url.PathUnescape(chi.URLParam(r, "roomID"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid room id")
+		return
+	}
+
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	isMember, err := h.auth.IsRoomMember(token, roomID, userID)
+	if err != nil || !isMember {
+		writeError(w, http.StatusForbidden, "not a member of the target room")
+		return
+	}
+
+	shares, err := h.db.ListSharesByTarget(roomID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list room shares")
+		log.Printf("ListSharesByTarget error for room %s: %v", roomID, err)
+		return
+	}
+
+	result := make([]map[string]interface{}, 0, len(shares))
+	for _, s := range shares {
+		result = append(result, map[string]interface{}{
+			"share_id":       s.ShareID,
+			"object_key":     s.ObjectKey,
+			"file_name":      s.FileName,
+			"file_size":      s.FileSize,
+			"mime_type":      s.MIMEType,
+			"vault_url":      h.publicURL + "/share/" + s.ShareID,
+			"share_type":     s.ShareType,
+			"owner_user_id":  s.OwnerUserID,
+			"target_id":      s.TargetID,
+			"expires_at":     s.ExpiresAt,
+			"is_revoked":     s.IsRevoked,
+			"download_count": s.DownloadCount,
+			"created_at":     s.CreatedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ListSharedWithMe returns active room shares from rooms the caller is currently joined to.
+func (h *Handler) ListSharedWithMe(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+
+	roomIDs, err := h.auth.JoinedRooms(token)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to load joined rooms")
+		log.Printf("JoinedRooms error for %s: %v", userID, err)
+		return
+	}
+
+	shares, err := h.db.ListSharesSharedWithUser(roomIDs, userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list shared files")
+		log.Printf("ListSharesSharedWithUser error for %s: %v", userID, err)
+		return
+	}
+
+	result := make([]map[string]interface{}, 0, len(shares))
+	for _, s := range shares {
+		result = append(result, map[string]interface{}{
+			"share_id":       s.ShareID,
+			"object_key":     s.ObjectKey,
+			"file_name":      s.FileName,
+			"file_size":      s.FileSize,
+			"mime_type":      s.MIMEType,
+			"vault_url":      h.publicURL + "/share/" + s.ShareID,
+			"share_type":     s.ShareType,
+			"owner_user_id":  s.OwnerUserID,
+			"target_id":      s.TargetID,
+			"expires_at":     s.ExpiresAt,
+			"is_revoked":     s.IsRevoked,
+			"download_count": s.DownloadCount,
+			"created_at":     s.CreatedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// PublicSharePage serves the HTML landing page for a share link.
+// No auth required. The page JS calls PublicShareDownload to get the presigned URL.
 func (h *Handler) PublicSharePage(w http.ResponseWriter, r *http.Request) {
 	shareID := chi.URLParam(r, "shareID")
 
@@ -509,36 +644,218 @@ func (h *Handler) PublicSharePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For password-protected shares, require password via query param
+	storedMime := ""
+	if share.MIMEType != nil {
+		storedMime = *share.MIMEType
+	}
+	// Fall back to extension-based detection when mime_type was not stored.
+	effMime := effectiveMime(storedMime, share.FileName)
+
+	expiresStr := ""
+	if share.ExpiresAt != nil {
+		expiresStr = share.ExpiresAt.UTC().Format("Jan 2, 2006 \u00b7 15:04 UTC")
+	}
+
+	data := SharePageData{
+		ShareID:     shareID,
+		FileName:    share.FileName,
+		FileSize:    humanFileSize(share.FileSize),
+		MIMEType:    effMime,
+		FileEmoji:   fileEmoji(effMime),
+		OwnerID:     shortenUserID(share.OwnerUserID),
+		HasExpiry:   share.ExpiresAt != nil,
+		ExpiresAt:   expiresStr,
+		HasPassword: share.PasswordHash != nil,
+		IsImage:     strings.HasPrefix(effMime, "image/"),
+		IsVideo:     strings.HasPrefix(effMime, "video/"),
+		IsAudio:     strings.HasPrefix(effMime, "audio/"),
+		IsRoomShare: share.ShareType == "room",
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := sharePageTmpl.Execute(w, data); err != nil {
+		log.Printf("share page template error for %s: %v", shareID, err)
+	}
+}
+
+// PublicShareDownload returns a presigned download URL as JSON.
+// Accepts GET (no password) or POST with form-encoded `password` field.
+// Called by the share landing page JavaScript.
+func (h *Handler) PublicShareDownload(w http.ResponseWriter, r *http.Request) {
+	shareID := chi.URLParam(r, "shareID")
+
+	share, err := h.db.GetShare(shareID)
+	if err != nil || share == nil {
+		writeError(w, http.StatusNotFound, "share not found")
+		return
+	}
+	if share.IsRevoked {
+		writeError(w, http.StatusGone, "share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "share has expired")
+		return
+	}
+	if share.MaxDownloads != nil && share.DownloadCount >= *share.MaxDownloads {
+		writeError(w, http.StatusGone, "download limit reached")
+		return
+	}
+
+	// Room shares require Matrix auth — the public page shows a sign-in notice.
+	if share.ShareType == "room" {
+		writeError(w, http.StatusForbidden, "this share requires authentication")
+		return
+	}
+
+	// Password validation
 	if share.PasswordHash != nil {
-		password := r.URL.Query().Get("password")
-		if password == "" {
-			http.Error(w, "Password required", http.StatusUnauthorized)
-			return
+		var password string
+		if r.Method == http.MethodPost {
+			if err := r.ParseForm(); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid form data")
+				return
+			}
+			password = r.FormValue("password")
+		} else {
+			password = r.URL.Query().Get("password")
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(*share.PasswordHash), []byte(password)); err != nil {
-			http.Error(w, "Invalid password", http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "invalid password")
 			return
 		}
 	}
 
-	// Look up owner to get bucket
 	owner, err := h.db.GetUser(share.OwnerUserID)
 	if err != nil || owner == nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
 	url, err := h.store.PresignedGetURL(r.Context(), owner.BucketName, share.ObjectKey, 15*time.Minute)
 	if err != nil {
-		http.Error(w, "Failed to generate download", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to generate download URL")
+		log.Printf("PresignedGetURL error for public share %s: %v", shareID, err)
 		return
 	}
 
 	_ = h.db.IncrementDownloadCount(shareID)
 
-	// Redirect to presigned URL
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	writeJSON(w, http.StatusOK, map[string]string{"download_url": url})
+}
+
+// ── Template helpers ──────────────────────────────────────────────
+
+func humanFileSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func fileEmoji(mimeType string) string {
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return "\U0001f5bc\ufe0f"
+	case strings.HasPrefix(mimeType, "video/"):
+		return "\U0001f3ac"
+	case strings.HasPrefix(mimeType, "audio/"):
+		return "\U0001f3b5"
+	case strings.Contains(mimeType, "pdf"):
+		return "\U0001f4c4"
+	case strings.Contains(mimeType, "zip") ||
+		strings.Contains(mimeType, "archive") ||
+		strings.Contains(mimeType, "x-tar") ||
+		strings.Contains(mimeType, "gzip"):
+		return "\U0001f4e6"
+	case strings.Contains(mimeType, "word") || strings.Contains(mimeType, "document"):
+		return "\U0001f4dd"
+	case strings.Contains(mimeType, "sheet") || strings.Contains(mimeType, "excel"):
+		return "\U0001f4ca"
+	case strings.Contains(mimeType, "presentation") || strings.Contains(mimeType, "powerpoint"):
+		return "\U0001f4ca"
+	default:
+		return "\U0001f4ce"
+	}
+}
+
+// effectiveMime returns the stored mime type when present, otherwise infers
+// one from the file extension. This handles old share records where mime_type
+// was not persisted in the database.
+func effectiveMime(storedMime, fileName string) string {
+	if storedMime != "" {
+		return storedMime
+	}
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".bmp":
+		return "image/bmp"
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".webm":
+		return "video/webm"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".m4a":
+		return "audio/mp4"
+	case ".ogg":
+		return "audio/ogg"
+	case ".wav":
+		return "audio/wav"
+	case ".flac":
+		return "audio/flac"
+	case ".aac":
+		return "audio/aac"
+	case ".pdf":
+		return "application/pdf"
+	case ".zip":
+		return "application/zip"
+	case ".tar":
+		return "application/x-tar"
+	case ".gz":
+		return "application/gzip"
+	case ".7z":
+		return "application/x-7z-compressed"
+	case ".rar":
+		return "application/x-rar-compressed"
+	case ".doc", ".docx":
+		return "application/msword"
+	case ".xls", ".xlsx":
+		return "application/vnd.ms-excel"
+	case ".ppt", ".pptx":
+		return "application/vnd.ms-powerpoint"
+	}
+	return ""
+}
+
+// shortenUserID turns "@alice:matrix.example.com" into "alice".
+func shortenUserID(userID string) string {
+	if strings.HasPrefix(userID, "@") {
+		parts := strings.SplitN(userID[1:], ":", 2)
+		return parts[0]
+	}
+	return userID
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

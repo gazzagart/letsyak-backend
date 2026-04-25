@@ -79,14 +79,18 @@ func main() {
 		r.Post("/files/move", handler.MoveFile)
 
 		r.Post("/shares", handler.CreateShare)
+		r.Get("/shares/mine", handler.ListMyShares)
+		r.Get("/shares/shared-with-me", handler.ListSharedWithMe)
+		r.Get("/shares/room/{roomID}", handler.ListRoomShares)
 		r.Get("/shares/{shareID}", handler.GetShare)
 		r.Get("/shares/{shareID}/download", handler.DownloadShare)
 		r.Delete("/shares/{shareID}", handler.RevokeShare)
-		r.Get("/shares/mine", handler.ListMyShares)
 	})
 
-	// Public share download page (no auth)
+	// Public share page (no auth) — HTML landing page + JSON download endpoint
 	r.Get("/share/{shareID}", handler.PublicSharePage)
+	r.Get("/share/{shareID}/download", handler.PublicShareDownload)
+	r.Post("/share/{shareID}/download", handler.PublicShareDownload)
 
 	log.Printf("LetsYak Vault API listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))

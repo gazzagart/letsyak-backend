@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Usage: ./scripts/create-user.sh <username> <password> [--admin]
+# ./scripts/create-user.sh gareth password123 --admin
+# ./scripts/create-user.sh anthony password123 --admin
 
 USERNAME="${1:?Usage: $0 <username> <password> [--admin]}"
 PASSWORD="${2:?Usage: $0 <username> <password> [--admin]}"

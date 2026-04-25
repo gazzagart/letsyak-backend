@@ -81,3 +81,31 @@ func (a *Authenticator) IsRoomMember(accessToken, roomID, userID string) (bool, 
 	_, isMember := result.Joined[userID]
 	return isMember, nil
 }
+
+// JoinedRooms returns the room IDs the token owner is currently joined to.
+func (a *Authenticator) JoinedRooms(accessToken string) ([]string, error) {
+	req, err := http.NewRequest("GET", a.synapseURL+"/_matrix/client/v3/joined_rooms", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("joined_rooms request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("joined_rooms returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		JoinedRooms []string `json:"joined_rooms"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode joined_rooms: %w", err)
+	}
+	return result.JoinedRooms, nil
+}

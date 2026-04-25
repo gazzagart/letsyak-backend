@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // Database wraps the PostgreSQL connection for vault metadata.
@@ -203,6 +203,36 @@ func (d *Database) RevokeShare(shareID, ownerUserID string) error {
 	return nil
 }
 
+// RevokeSharesByObjectKey marks every active share for a file as revoked.
+func (d *Database) RevokeSharesByObjectKey(ownerUserID, objectKey string) error {
+	_, err := d.db.Exec(
+		`UPDATE vault_shares SET is_revoked = TRUE
+		 WHERE owner_user_id = $1 AND object_key = $2 AND NOT is_revoked`,
+		ownerUserID, objectKey,
+	)
+	return err
+}
+
+// RevokeSharesByObjectPrefix marks every active share under a folder as revoked.
+func (d *Database) RevokeSharesByObjectPrefix(ownerUserID, objectPrefix string) error {
+	_, err := d.db.Exec(
+		`UPDATE vault_shares SET is_revoked = TRUE
+		 WHERE owner_user_id = $1 AND object_key LIKE $2 || '%' AND NOT is_revoked`,
+		ownerUserID, objectPrefix,
+	)
+	return err
+}
+
+// UpdateSharesObjectKey keeps active shares valid when a file is moved.
+func (d *Database) UpdateSharesObjectKey(ownerUserID, fromKey, toKey, fileName string) error {
+	_, err := d.db.Exec(
+		`UPDATE vault_shares SET object_key = $3, file_name = $4
+		 WHERE owner_user_id = $1 AND object_key = $2 AND NOT is_revoked`,
+		ownerUserID, fromKey, toKey, fileName,
+	)
+	return err
+}
+
 // ListSharesByOwner returns all shares for a user.
 func (d *Database) ListSharesByOwner(ownerUserID string) ([]*Share, error) {
 	rows, err := d.db.Query(
@@ -213,6 +243,78 @@ func (d *Database) ListSharesByOwner(ownerUserID string) ([]*Share, error) {
 		 WHERE owner_user_id = $1
 		 ORDER BY created_at DESC`,
 		ownerUserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []*Share
+	for rows.Next() {
+		s := &Share{}
+		if err := rows.Scan(
+			&s.ShareID, &s.OwnerUserID, &s.ObjectKey, &s.FileName, &s.FileSize, &s.MIMEType,
+			&s.ShareType, &s.TargetID, &s.PasswordHash, &s.ExpiresAt, &s.MaxDownloads,
+			&s.DownloadCount, &s.IsRevoked, &s.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		shares = append(shares, s)
+	}
+	return shares, rows.Err()
+}
+
+// ListSharesByTarget returns all active, non-expired shares targeting a room.
+func (d *Database) ListSharesByTarget(targetID string) ([]*Share, error) {
+	rows, err := d.db.Query(
+		`SELECT share_id, owner_user_id, object_key, file_name, file_size, mime_type,
+		        share_type, target_id, password_hash, expires_at, max_downloads,
+		        download_count, is_revoked, created_at
+		 FROM vault_shares
+		 WHERE target_id = $1
+		   AND NOT is_revoked
+		   AND (expires_at IS NULL OR expires_at > NOW())
+		 ORDER BY created_at DESC`,
+		targetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []*Share
+	for rows.Next() {
+		s := &Share{}
+		if err := rows.Scan(
+			&s.ShareID, &s.OwnerUserID, &s.ObjectKey, &s.FileName, &s.FileSize, &s.MIMEType,
+			&s.ShareType, &s.TargetID, &s.PasswordHash, &s.ExpiresAt, &s.MaxDownloads,
+			&s.DownloadCount, &s.IsRevoked, &s.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		shares = append(shares, s)
+	}
+	return shares, rows.Err()
+}
+
+// ListSharesSharedWithUser returns active room shares for joined rooms, excluding shares owned by the viewer.
+func (d *Database) ListSharesSharedWithUser(targetIDs []string, viewerUserID string) ([]*Share, error) {
+	if len(targetIDs) == 0 {
+		return []*Share{}, nil
+	}
+
+	rows, err := d.db.Query(
+		`SELECT share_id, owner_user_id, object_key, file_name, file_size, mime_type,
+		        share_type, target_id, password_hash, expires_at, max_downloads,
+		        download_count, is_revoked, created_at
+		 FROM vault_shares
+		 WHERE share_type = 'room'
+		   AND target_id = ANY($1)
+		   AND owner_user_id <> $2
+		   AND NOT is_revoked
+		   AND (expires_at IS NULL OR expires_at > NOW())
+		 ORDER BY created_at DESC`,
+		pq.Array(targetIDs), viewerUserID,
 	)
 	if err != nil {
 		return nil, err
