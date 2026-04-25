@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,6 +13,45 @@ import (
 // Database wraps the PostgreSQL connection for vault metadata.
 type Database struct {
 	db *sql.DB
+}
+
+const (
+	TierFree = "free"
+	TierPlus = "plus"
+
+	FreeQuotaBytes int64 = 500 * 1024 * 1024
+	PlusQuotaBytes int64 = 5 * 1024 * 1024 * 1024
+)
+
+type TierInfo struct {
+	Tier       string
+	Label      string
+	QuotaBytes int64
+	LimitLabel string
+}
+
+func TierInfoFor(tier string) (TierInfo, error) {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case TierFree:
+		return TierInfo{Tier: TierFree, Label: "Free", QuotaBytes: FreeQuotaBytes, LimitLabel: "500 MB"}, nil
+	case TierPlus:
+		return TierInfo{Tier: TierPlus, Label: "Plus", QuotaBytes: PlusQuotaBytes, LimitLabel: "5 GB"}, nil
+	default:
+		return TierInfo{}, fmt.Errorf("unknown vault tier %q", tier)
+	}
+}
+
+func UpgradeTierInfoFor(tier string) (TierInfo, bool) {
+	info, err := TierInfoFor(tier)
+	if err != nil || info.Tier != TierFree {
+		return TierInfo{}, false
+	}
+
+	upgradeInfo, err := TierInfoFor(TierPlus)
+	if err != nil {
+		return TierInfo{}, false
+	}
+	return upgradeInfo, true
 }
 
 // VaultUser represents a user's vault account.
@@ -64,13 +104,13 @@ func (d *Database) Close() error {
 
 // Migrate creates the tables if they don't exist.
 func (d *Database) Migrate() error {
-	_, err := d.db.Exec(`
+	_, err := d.db.Exec(fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS vault_users (
 			matrix_user_id   TEXT PRIMARY KEY,
 			bucket_name      TEXT NOT NULL UNIQUE,
-			quota_bytes      BIGINT NOT NULL DEFAULT 524288000,
+			quota_bytes      BIGINT NOT NULL DEFAULT %d,
 			used_bytes       BIGINT NOT NULL DEFAULT 0,
-			tier             TEXT NOT NULL DEFAULT 'free',
+			tier             TEXT NOT NULL DEFAULT '%s',
 			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 
@@ -93,7 +133,7 @@ func (d *Database) Migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_shares_target ON vault_shares(target_id) WHERE NOT is_revoked;
 		CREATE INDEX IF NOT EXISTS idx_shares_owner ON vault_shares(owner_user_id);
-	`)
+	`, FreeQuotaBytes, TierFree))
 	return err
 }
 
@@ -101,11 +141,11 @@ func (d *Database) Migrate() error {
 func (d *Database) GetOrCreateUser(matrixUserID, bucketName string) (*VaultUser, error) {
 	user := &VaultUser{}
 	err := d.db.QueryRow(
-		`INSERT INTO vault_users (matrix_user_id, bucket_name)
-		 VALUES ($1, $2)
+		`INSERT INTO vault_users (matrix_user_id, bucket_name, quota_bytes, tier)
+		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (matrix_user_id) DO UPDATE SET matrix_user_id = vault_users.matrix_user_id
 		 RETURNING matrix_user_id, bucket_name, quota_bytes, used_bytes, tier, created_at`,
-		matrixUserID, bucketName,
+		matrixUserID, bucketName, FreeQuotaBytes, TierFree,
 	).Scan(&user.MatrixUserID, &user.BucketName, &user.QuotaBytes, &user.UsedBytes, &user.Tier, &user.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get or create user: %w", err)
@@ -137,6 +177,29 @@ func (d *Database) UpdateUsedBytes(matrixUserID string, usedBytes int64) error {
 		usedBytes, matrixUserID,
 	)
 	return err
+}
+
+func (d *Database) UpdateUserTier(matrixUserID, tier string) (*VaultUser, error) {
+	tierInfo, err := TierInfoFor(tier)
+	if err != nil {
+		return nil, err
+	}
+
+	user := &VaultUser{}
+	err = d.db.QueryRow(
+		`UPDATE vault_users
+		 SET tier = $2, quota_bytes = $3
+		 WHERE matrix_user_id = $1
+		 RETURNING matrix_user_id, bucket_name, quota_bytes, used_bytes, tier, created_at`,
+		matrixUserID, tierInfo.Tier, tierInfo.QuotaBytes,
+	).Scan(&user.MatrixUserID, &user.BucketName, &user.QuotaBytes, &user.UsedBytes, &user.Tier, &user.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update user tier: %w", err)
+	}
+	return user, nil
 }
 
 // CreateShare inserts a new share record.

@@ -133,11 +133,64 @@ func (h *Handler) GetQuota(w http.ResponseWriter, r *http.Request) {
 		_ = h.db.UpdateUsedBytes(userID, size)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"used_bytes":  size,
-		"total_bytes": user.QuotaBytes,
-		"tier":        user.Tier,
-	})
+	writeJSON(w, http.StatusOK, quotaResponse(user, size))
+}
+
+func quotaResponse(user *db.VaultUser, usedBytes int64) map[string]interface{} {
+	tierInfo, err := db.TierInfoFor(user.Tier)
+	if err != nil {
+		tierInfo = db.TierInfo{
+			Tier:       user.Tier,
+			Label:      user.Tier,
+			QuotaBytes: user.QuotaBytes,
+			LimitLabel: formatQuotaLabel(user.QuotaBytes),
+		}
+	}
+
+	remainingBytes := user.QuotaBytes - usedBytes
+	if remainingBytes < 0 {
+		remainingBytes = 0
+	}
+
+	usagePercent := 0.0
+	if user.QuotaBytes > 0 {
+		usagePercent = float64(usedBytes) / float64(user.QuotaBytes)
+	}
+
+	response := map[string]interface{}{
+		"used_bytes":      usedBytes,
+		"total_bytes":     user.QuotaBytes,
+		"remaining_bytes": remainingBytes,
+		"usage_percent":   usagePercent,
+		"is_over_quota":   usedBytes > user.QuotaBytes,
+		"tier":            tierInfo.Tier,
+		"tier_label":      tierInfo.Label,
+		"limit_label":     tierInfo.LimitLabel,
+	}
+
+	if upgradeInfo, ok := db.UpgradeTierInfoFor(user.Tier); ok {
+		response["upgrade_available"] = true
+		response["upgrade_tier"] = upgradeInfo.Tier
+		response["upgrade_tier_label"] = upgradeInfo.Label
+		response["upgrade_limit_bytes"] = upgradeInfo.QuotaBytes
+		response["upgrade_limit_label"] = upgradeInfo.LimitLabel
+	} else {
+		response["upgrade_available"] = false
+	}
+
+	return response
+}
+
+func formatQuotaLabel(bytes int64) string {
+	const gb = 1024 * 1024 * 1024
+	const mb = 1024 * 1024
+	if bytes%gb == 0 {
+		return fmt.Sprintf("%d GB", bytes/gb)
+	}
+	if bytes%mb == 0 {
+		return fmt.Sprintf("%d MB", bytes/mb)
+	}
+	return fmt.Sprintf("%d bytes", bytes)
 }
 
 // ── Files ─────────────────────────────────────────────────────────
