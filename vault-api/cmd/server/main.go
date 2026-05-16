@@ -85,6 +85,15 @@ func main() {
 		r.Get("/shares/{shareID}", handler.GetShare)
 		r.Get("/shares/{shareID}/download", handler.DownloadShare)
 		r.Delete("/shares/{shareID}", handler.RevokeShare)
+
+		r.Get("/orgs", handler.ListOrganizations)
+		r.Post("/orgs", handler.CreateOrganization)
+		r.Get("/orgs/{orgID}/members", handler.ListOrganizationMembers)
+		r.Post("/orgs/{orgID}/members", handler.AddOrganizationMember)
+		r.Post("/orgs/{orgID}/members/{matrixUserID}/role", handler.UpdateOrganizationMemberRole)
+		r.Post("/orgs/{orgID}/members/{matrixUserID}/tier", handler.UpdateOrganizationMemberTier)
+		r.Delete("/orgs/{orgID}/members/{matrixUserID}", handler.RemoveOrganizationMember)
+		r.Get("/orgs/{orgID}/usage", handler.GetOrganizationUsage)
 	})
 
 	// Public share page (no auth) — HTML landing page + JSON download endpoint

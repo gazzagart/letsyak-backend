@@ -1,0 +1,27 @@
+{
+  "workspaces": [
+    {
+      "id": "local",
+      "slug": "local",
+      "display_name": "LetsYak Local",
+      "status": "active",
+      "email_domains": ["example.com", "letsyak.local"],
+      "homeserver_url": "http://localhost:8008",
+      "vault_api_url": "http://localhost:8090",
+      "isolation_tier": "dedicated",
+      "security_mode": "easy_e2ee",
+      "login_methods": ["password"],
+      "branding": {
+        "logo_url": "",
+        "primary_color": "#5625BA",
+        "secondary_color": "#41A2BC",
+        "support_url": "https://letsyak.com/help",
+        "privacy_url": "https://letsyak.com/privacy"
+      },
+      "features": {
+        "vault": true,
+        "organisation_admin": true
+      }
+    }
+  ]
+}

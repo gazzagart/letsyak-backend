@@ -14,6 +14,12 @@ function New-Secret {
     return ([Convert]::ToBase64String($bytes)).Replace('/', '').Replace('+', '')
 }
 
+  function Get-EnvOrDefault($Name, $Default) {
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
+    return $value
+  }
+
 Write-Host ""
 Write-Host "+===========================================+" -ForegroundColor Cyan
 Write-Host "|        LetsYak Server Setup               |" -ForegroundColor Cyan
@@ -38,14 +44,30 @@ if (Test-Path .env) {
 Write-Host "Configuration" -ForegroundColor Cyan
 Write-Host "-------------"
 
+$TenantStackName = Get-EnvOrDefault "TENANT_STACK_NAME" "letsyak"
+$ProxyNetworkName = Get-EnvOrDefault "PROXY_NETWORK_NAME" "proxy-network"
+$ControlPlaneTenantConfig = Get-EnvOrDefault "CONTROL_PLANE_TENANT_CONFIG" "./control-plane/config/tenants.sample.json"
+
 $MatrixDomain = Read-Host "Matrix domain [chat.maybery.app]"
 if ([string]::IsNullOrWhiteSpace($MatrixDomain)) { $MatrixDomain = "chat.maybery.app" }
 
 $TurnDomain = Read-Host "TURN domain [turn.maybery.app]"
 if ([string]::IsNullOrWhiteSpace($TurnDomain)) { $TurnDomain = "turn.maybery.app" }
 
+$VaultApiDomain = Read-Host "Vault API domain [vault.maybery.app]"
+if ([string]::IsNullOrWhiteSpace($VaultApiDomain)) { $VaultApiDomain = "vault.maybery.app" }
+
+$VaultFilesDomain = Read-Host "Vault files / MinIO domain [files.maybery.app]"
+if ([string]::IsNullOrWhiteSpace($VaultFilesDomain)) { $VaultFilesDomain = "files.maybery.app" }
+
 do { $PublicIP = Read-Host "Server public IP address" }
 while ([string]::IsNullOrWhiteSpace($PublicIP))
+
+if ([string]::IsNullOrWhiteSpace($env:SYNAPSE_MAX_UPLOAD_SIZE)) {
+    $SynapseMaxUploadSize = "50M"
+} else {
+    $SynapseMaxUploadSize = $env:SYNAPSE_MAX_UPLOAD_SIZE
+}
 
 # --- Generate secrets ---------------------------------------------------------
 Write-Host "`nGenerating secrets..." -ForegroundColor Yellow
@@ -54,6 +76,8 @@ $RegistrationSecret = New-Secret
 $MacaroonSecret     = New-Secret
 $FormSecret         = New-Secret
 $TurnSecret         = New-Secret
+$MinioAccessKey     = (New-Guid).ToString("N").Substring(0, 24)
+$MinioSecretKey     = New-Secret
 
 # --- Create .env --------------------------------------------------------------
 $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
@@ -61,8 +85,15 @@ $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
 # LetsYak Server Configuration
 # Generated: $timestamp
 
+TENANT_STACK_NAME=$TenantStackName
+PROXY_NETWORK_NAME=$ProxyNetworkName
+CONTROL_PLANE_TENANT_CONFIG=$ControlPlaneTenantConfig
+
 MATRIX_DOMAIN=$MatrixDomain
 TURN_DOMAIN=$TurnDomain
+VAULT_API_DOMAIN=$VaultApiDomain
+VAULT_FILES_DOMAIN=$VaultFilesDomain
+SYNAPSE_MAX_UPLOAD_SIZE=$SynapseMaxUploadSize
 PUBLIC_IP=$PublicIP
 
 POSTGRES_PASSWORD=$PostgresPassword
@@ -70,6 +101,9 @@ REGISTRATION_SECRET=$RegistrationSecret
 MACAROON_SECRET=$MacaroonSecret
 FORM_SECRET=$FormSecret
 TURN_SECRET=$TurnSecret
+
+MINIO_ACCESS_KEY=$MinioAccessKey
+MINIO_SECRET_KEY=$MinioSecretKey
 "@ | Set-Content -Path ".env" -Encoding UTF8
 Write-Host "  + .env" -ForegroundColor Green
 
@@ -130,7 +164,7 @@ redis:
 log_config: "/data/log.config"
 
 media_store_path: /data/media_store
-max_upload_size: 100M
+max_upload_size: $SynapseMaxUploadSize
 
 url_preview_enabled: true
 url_preview_ip_range_blacklist:
@@ -261,6 +295,14 @@ docker run --rm `
     -c "chown -R 991:991 /data" 2>$null
 Write-Host "  + Permissions set" -ForegroundColor Green
 
+# --- Ensure proxy network exists ---------------------------------------------
+docker network inspect $ProxyNetworkName *> $null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Creating $ProxyNetworkName..." -ForegroundColor Yellow
+  docker network create $ProxyNetworkName | Out-Null
+  Write-Host "  + $ProxyNetworkName created" -ForegroundColor Green
+}
+
 # --- Summary ------------------------------------------------------------------
 Write-Host ""
 Write-Host "+===========================================+" -ForegroundColor Green
@@ -272,6 +314,8 @@ Write-Host ""
 Write-Host "1. DNS records (if not already set):" -ForegroundColor Yellow
 Write-Host "   $MatrixDomain  ->  A  $PublicIP  (can be Cloudflare proxied)"
 Write-Host "   $TurnDomain    ->  A  $PublicIP  (MUST be DNS only / grey cloud)"
+Write-Host "   $VaultApiDomain -> A  $PublicIP  (can be Cloudflare proxied)"
+Write-Host "   $VaultFilesDomain -> A $PublicIP  (can be Cloudflare proxied)"
 Write-Host ""
 Write-Host "2. Firewall ports:" -ForegroundColor Yellow
 Write-Host "   3478/tcp+udp     TURN"

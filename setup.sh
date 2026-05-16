@@ -26,6 +26,10 @@ for arg in "$@"; do
     fi
 done
 
+TENANT_STACK_NAME="${TENANT_STACK_NAME:-letsyak}"
+PROXY_NETWORK_NAME="${PROXY_NETWORK_NAME:-proxy-network}"
+CONTROL_PLANE_TENANT_CONFIG="${CONTROL_PLANE_TENANT_CONFIG:-./control-plane/config/tenants.sample.json}"
+
 echo -e "${CYAN}"
 if $LOCAL; then
     echo "╔═══════════════════════════════════════╗"
@@ -63,13 +67,23 @@ fi
 
 # --- Gather configuration ----------------------------------------------------
 if $LOCAL; then
-    MATRIX_DOMAIN="localhost"
-    TURN_DOMAIN="localhost"
-    VAULT_API_DOMAIN="localhost:8090"
-    VAULT_FILES_DOMAIN="localhost:9000"
-    PUBLIC_IP="127.0.0.1"
+  LOCAL_BIND_ADDRESS="${LOCAL_BIND_ADDRESS:-127.0.0.1}"
+  LOCAL_PUBLIC_HOST="${LOCAL_PUBLIC_HOST:-localhost}"
+  SYNAPSE_HTTP_PORT="${SYNAPSE_HTTP_PORT:-8008}"
+  WELL_KNOWN_HTTP_PORT="${WELL_KNOWN_HTTP_PORT:-8080}"
+  CONTROL_PLANE_HTTP_PORT="${CONTROL_PLANE_HTTP_PORT:-8085}"
+  VAULT_API_HTTP_PORT="${VAULT_API_HTTP_PORT:-8090}"
+  MINIO_API_PORT="${MINIO_API_PORT:-9000}"
+  MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+  LOCAL_CORS_ALLOWED_ORIGINS="${LOCAL_CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"
+
+  MATRIX_DOMAIN="${MATRIX_DOMAIN:-localhost}"
+  TURN_DOMAIN="${TURN_DOMAIN:-localhost}"
+  VAULT_API_DOMAIN="${VAULT_API_DOMAIN:-${LOCAL_PUBLIC_HOST}:${VAULT_API_HTTP_PORT}}"
+  VAULT_FILES_DOMAIN="${VAULT_FILES_DOMAIN:-${LOCAL_PUBLIC_HOST}:${MINIO_API_PORT}}"
+  PUBLIC_IP="${PUBLIC_IP:-127.0.0.1}"
     PUBLIC_SCHEME="http"
-    SYNAPSE_BASEURL="http://localhost:8008/"
+  SYNAPSE_BASEURL="http://${LOCAL_PUBLIC_HOST}:${SYNAPSE_HTTP_PORT}/"
     ENABLE_REGISTRATION="true"
     echo -e "${CYAN}Local dev mode — all services bound to localhost.${NC}"
     echo ""
@@ -99,6 +113,8 @@ else
     ENABLE_REGISTRATION="false"
 fi
 
+SYNAPSE_MAX_UPLOAD_SIZE="${SYNAPSE_MAX_UPLOAD_SIZE:-50M}"
+
 # --- Generate secrets ---------------------------------------------------------
 echo -e "${YELLOW}Generating secrets...${NC}"
 POSTGRES_PASSWORD=$(openssl rand -base64 32 | tr -d '/+')
@@ -115,12 +131,34 @@ cat > .env << EOF
 # Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Mode: $(if $LOCAL; then echo "local"; else echo "production"; fi)
 
+TENANT_STACK_NAME=${TENANT_STACK_NAME}
+PROXY_NETWORK_NAME=${PROXY_NETWORK_NAME}
+CONTROL_PLANE_TENANT_CONFIG=${CONTROL_PLANE_TENANT_CONFIG}
+
 MATRIX_DOMAIN=${MATRIX_DOMAIN}
 TURN_DOMAIN=${TURN_DOMAIN}
 VAULT_API_DOMAIN=${VAULT_API_DOMAIN}
 VAULT_FILES_DOMAIN=${VAULT_FILES_DOMAIN}
+SYNAPSE_MAX_UPLOAD_SIZE=${SYNAPSE_MAX_UPLOAD_SIZE}
 PUBLIC_IP=${PUBLIC_IP}
 
+EOF
+
+if $LOCAL; then
+    cat >> .env << EOF
+LOCAL_BIND_ADDRESS=${LOCAL_BIND_ADDRESS}
+LOCAL_PUBLIC_HOST=${LOCAL_PUBLIC_HOST}
+SYNAPSE_HTTP_PORT=${SYNAPSE_HTTP_PORT}
+WELL_KNOWN_HTTP_PORT=${WELL_KNOWN_HTTP_PORT}
+CONTROL_PLANE_HTTP_PORT=${CONTROL_PLANE_HTTP_PORT}
+VAULT_API_HTTP_PORT=${VAULT_API_HTTP_PORT}
+MINIO_API_PORT=${MINIO_API_PORT}
+MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT}
+LOCAL_CORS_ALLOWED_ORIGINS=${LOCAL_CORS_ALLOWED_ORIGINS}
+
+EOF
+fi
+cat >> .env << EOF
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 REGISTRATION_SECRET=${REGISTRATION_SECRET}
 MACAROON_SECRET=${MACAROON_SECRET}
@@ -202,7 +240,7 @@ redis:
 log_config: "/data/log.config"
 
 media_store_path: /data/media_store
-max_upload_size: 100M
+max_upload_size: ${SYNAPSE_MAX_UPLOAD_SIZE}
 
 url_preview_enabled: true
 url_preview_ip_range_blacklist:
@@ -306,13 +344,13 @@ if $LOCAL; then
     cat > well-known/www/client.json << JSON
 {
   "m.homeserver": {
-    "base_url": "http://localhost:8008"
+    "base_url": "http://${LOCAL_PUBLIC_HOST}:${SYNAPSE_HTTP_PORT}"
   }
 }
 JSON
     cat > well-known/www/server.json << JSON
 {
-  "m.server": "localhost:8008"
+  "m.server": "${LOCAL_PUBLIC_HOST}:${SYNAPSE_HTTP_PORT}"
 }
 JSON
 else
@@ -353,27 +391,32 @@ if $LOCAL; then
 services:
   synapse:
     ports:
-      - "127.0.0.1:8008:8008"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${SYNAPSE_HTTP_PORT:-8008}:8008"
 
   well-known:
     ports:
-      - "127.0.0.1:8080:80"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${WELL_KNOWN_HTTP_PORT:-8080}:80"
 
   vault-api:
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${VAULT_API_HTTP_PORT:-8090}:8090"
     environment:
-      MINIO_PUBLIC_URL: "http://localhost:9000"
-      VAULT_PUBLIC_URL: "http://localhost:8090"
+      MINIO_PUBLIC_URL: "http://${LOCAL_PUBLIC_HOST:-localhost}:${MINIO_API_PORT:-9000}"
+      VAULT_PUBLIC_URL: "http://${LOCAL_PUBLIC_HOST:-localhost}:${VAULT_API_HTTP_PORT:-8090}"
+      CORS_ALLOWED_ORIGINS: "${LOCAL_CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"
+
+  control-plane:
+    ports:
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${CONTROL_PLANE_HTTP_PORT:-8085}:8085"
 
   minio:
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     command: server /data --console-address ":9001"
     environment:
       # Allow browser uploads from any localhost origin (local dev only)
-      MINIO_API_CORS_ALLOW_ORIGIN: "http://localhost:*"
+      MINIO_API_CORS_ALLOW_ORIGIN: "${LOCAL_CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"
 
   coturn:
     profiles: ["disabled"]
@@ -387,17 +430,17 @@ services:
 networks:
   proxy-network:
     external: false
-    name: letsyak-proxy-local
+    name: ${TENANT_STACK_NAME:-letsyak}-proxy-local
 OVERRIDE
     echo -e "${GREEN}  ✓ docker-compose.override.yml${NC}"
 fi
 
 # --- Production: ensure proxy-network exists ---------------------------------
 if ! $LOCAL; then
-    if ! docker network inspect proxy-network &>/dev/null; then
-        echo -e "${YELLOW}Creating proxy-network...${NC}"
-        docker network create proxy-network
-        echo -e "${GREEN}  ✓ proxy-network created${NC}"
+  if ! docker network inspect "$PROXY_NETWORK_NAME" &>/dev/null; then
+    echo -e "${YELLOW}Creating ${PROXY_NETWORK_NAME}...${NC}"
+    docker network create "$PROXY_NETWORK_NAME"
+    echo -e "${GREEN}  ✓ ${PROXY_NETWORK_NAME} created${NC}"
     fi
 fi
 
@@ -414,13 +457,14 @@ if $LOCAL; then
     echo "   docker compose up -d"
     echo ""
     echo "2. Services available at:"
-    echo "   Synapse (Matrix):  http://localhost:8008"
-    echo "   Well-known:        http://localhost:8080"
-    echo "   Vault API:         http://localhost:8090"
-    echo "   MinIO console:     http://localhost:9001"
+    echo "   Synapse (Matrix):  http://${LOCAL_PUBLIC_HOST}:${SYNAPSE_HTTP_PORT}"
+    echo "   Control plane:     http://${LOCAL_PUBLIC_HOST}:${CONTROL_PLANE_HTTP_PORT}"
+    echo "   Well-known:        http://${LOCAL_PUBLIC_HOST}:${WELL_KNOWN_HTTP_PORT}"
+    echo "   Vault API:         http://${LOCAL_PUBLIC_HOST}:${VAULT_API_HTTP_PORT}"
+    echo "   MinIO console:     http://${LOCAL_PUBLIC_HOST}:${MINIO_CONSOLE_PORT}"
     echo ""
     echo "3. In the LetsYak app login screen, set homeserver to:"
-    echo "   http://localhost:8008"
+    echo "   http://${LOCAL_PUBLIC_HOST}:${SYNAPSE_HTTP_PORT}"
     echo ""
     echo "4. Create a test user:"
     echo "   ./scripts/create-user.sh alice 'password123'"

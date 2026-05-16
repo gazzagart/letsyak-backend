@@ -205,6 +205,135 @@ func TestUpdateUserTierIntegration(t *testing.T) {
 	}
 }
 
+func TestOrganizationLifecycleIntegration(t *testing.T) {
+	databaseURL := os.Getenv("VAULT_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set VAULT_TEST_DATABASE_URL to run Postgres integration tests")
+	}
+
+	schema := fmt.Sprintf("vault_test_%d", time.Now().UnixNano())
+	adminDB, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open admin database: %v", err)
+	}
+	defer adminDB.Close()
+
+	if _, err := adminDB.Exec(`CREATE SCHEMA ` + pq.QuoteIdentifier(schema)); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	defer func() {
+		_, _ = adminDB.Exec(`DROP SCHEMA ` + pq.QuoteIdentifier(schema) + ` CASCADE`)
+	}()
+
+	database, err := New(databaseURLWithSearchPath(t, databaseURL, schema))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer database.Close()
+	if err := database.Migrate(); err != nil {
+		t.Fatalf("migrate test schema: %v", err)
+	}
+
+	const (
+		ownerUser  = "@owner:example.test"
+		adminUser  = "@admin:example.test"
+		memberUser = "@member:example.test"
+	)
+	if _, err := database.GetOrCreateUser(ownerUser, "owner-bucket"); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+	if _, err := database.GetOrCreateUser(adminUser, "admin-bucket"); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	if member, err := database.GetOrCreateUser(memberUser, "member-bucket"); err != nil {
+		t.Fatalf("seed member: %v", err)
+	} else if err := database.UpdateUsedBytes(member.MatrixUserID, 1234); err != nil {
+		t.Fatalf("seed member usage: %v", err)
+	}
+
+	org, err := database.CreateOrganization("Acme Team", "acme-team", ownerUser)
+	if err != nil {
+		t.Fatalf("create organisation: %v", err)
+	}
+	if org.Role != OrgRoleOwner || org.OwnerUserID != ownerUser {
+		t.Fatalf("created org membership=%#v, want owner membership", org)
+	}
+
+	if _, err := database.UpdateOrganizationMemberRole(org.ID, ownerUser, ownerUser, OrgRoleMember); err != ErrLastOwner {
+		t.Fatalf("demote only owner error=%v, want ErrLastOwner", err)
+	}
+
+	admin, err := database.AddOrganizationMember(org.ID, ownerUser, adminUser, OrgRoleAdmin, TierFree)
+	if err != nil {
+		t.Fatalf("add admin: %v", err)
+	}
+	if admin.Role != OrgRoleAdmin || admin.AssignedTier != TierFree {
+		t.Fatalf("admin member=%#v, want admin/free", admin)
+	}
+	secondOwner, err := database.UpdateOrganizationMemberRole(org.ID, ownerUser, adminUser, OrgRoleOwner)
+	if err != nil {
+		t.Fatalf("promote admin to owner: %v", err)
+	}
+	if secondOwner.Role != OrgRoleOwner {
+		t.Fatalf("second owner role=%s, want owner", secondOwner.Role)
+	}
+
+	updatedOwner, err := database.UpdateOrganizationMemberRole(org.ID, adminUser, ownerUser, OrgRoleMember)
+	if err != nil {
+		t.Fatalf("demote owner after adding admin: %v", err)
+	}
+	if updatedOwner.Role != OrgRoleMember {
+		t.Fatalf("updated owner role=%s, want member", updatedOwner.Role)
+	}
+
+	member, err := database.AddOrganizationMember(org.ID, adminUser, memberUser, OrgRoleMember, TierPlus)
+	if err != nil {
+		t.Fatalf("add plus member: %v", err)
+	}
+	if member.AssignedTier != TierPlus || member.QuotaBytes != PlusQuotaBytes {
+		t.Fatalf("member tier=%s quota=%d, want plus/%d", member.AssignedTier, member.QuotaBytes, PlusQuotaBytes)
+	}
+
+	usage, err := database.GetOrganizationUsage(org.ID)
+	if err != nil {
+		t.Fatalf("get usage: %v", err)
+	}
+	if usage.ActiveMembers != 3 || usage.AssignedPlusSeats != 1 || usage.TotalUsedBytes != 1234 {
+		t.Fatalf("usage=%#v, want 3 active, 1 plus, 1234 used", usage)
+	}
+
+	removed, err := database.RemoveOrganizationMember(org.ID, adminUser, memberUser)
+	if err != nil {
+		t.Fatalf("remove member: %v", err)
+	}
+	if !removed {
+		t.Fatal("remove member returned false, want true")
+	}
+	storedMember, err := database.GetUser(memberUser)
+	if err != nil {
+		t.Fatalf("get removed member user: %v", err)
+	}
+	if storedMember.Tier != TierFree || storedMember.QuotaBytes != FreeQuotaBytes {
+		t.Fatalf("removed member tier=%s quota=%d, want free/%d", storedMember.Tier, storedMember.QuotaBytes, FreeQuotaBytes)
+	}
+
+	orgs, err := database.ListOrganizationsForUser(memberUser)
+	if err != nil {
+		t.Fatalf("list removed member orgs: %v", err)
+	}
+	if len(orgs) != 0 {
+		t.Fatalf("removed member still has %d orgs, want 0", len(orgs))
+	}
+
+	var auditCount int
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM organisation_audit_log WHERE org_id = $1`, org.ID).Scan(&auditCount); err != nil {
+		t.Fatalf("count audit log: %v", err)
+	}
+	if auditCount < 5 {
+		t.Fatalf("audit log has %d rows, want at least 5", auditCount)
+	}
+}
+
 type testShare struct {
 	ownerUserID string
 	fileName    string

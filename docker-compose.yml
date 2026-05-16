@@ -7,7 +7,7 @@
 services:
   synapse:
     image: matrixdotorg/synapse:latest
-    container_name: letsyak-synapse
+    container_name: ${TENANT_STACK_NAME:-letsyak}-synapse
     restart: unless-stopped
     depends_on:
       postgres:
@@ -26,7 +26,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: letsyak-postgres
+    container_name: ${TENANT_STACK_NAME:-letsyak}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: synapse
@@ -46,7 +46,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: letsyak-redis
+    container_name: ${TENANT_STACK_NAME:-letsyak}-redis
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -60,7 +60,7 @@ services:
 
   coturn:
     image: coturn/coturn:latest
-    container_name: letsyak-coturn
+    container_name: ${TENANT_STACK_NAME:-letsyak}-coturn
     restart: unless-stopped
     command: ["-c", "/etc/coturn/turnserver.conf", "--no-cli"]
     volumes:
@@ -77,7 +77,7 @@ services:
   # LetsYak Web Client
   letsyak-web:
     image: letsyak-web:latest
-    container_name: letsyak-web
+    container_name: ${TENANT_STACK_NAME:-letsyak}-web
     restart: unless-stopped
     expose:
       - "80"
@@ -87,7 +87,7 @@ services:
   # Serves /.well-known/matrix/* responses for NPM to proxy to
   well-known:
     image: nginx:alpine
-    container_name: letsyak-well-known
+    container_name: ${TENANT_STACK_NAME:-letsyak}-well-known
     restart: unless-stopped
     volumes:
       - ./well-known/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -97,9 +97,27 @@ services:
     networks:
       - proxy-network
 
+  # Shared LetsYak workspace directory / tenant router.
+  # This is intentionally outside a tenant-specific Vault API so one app can
+  # discover the correct Matrix/Vault backend before login.
+  control-plane:
+    build: ./control-plane
+    container_name: ${TENANT_STACK_NAME:-letsyak}-control-plane
+    restart: unless-stopped
+    environment:
+      PORT: "8085"
+      TENANT_CONFIG_PATH: "/config/tenants.json"
+      CORS_ALLOWED_ORIGINS: "*"
+    volumes:
+      - ${CONTROL_PLANE_TENANT_CONFIG:-./control-plane/config/tenants.sample.json}:/config/tenants.json:ro
+    expose:
+      - "8085"
+    networks:
+      - proxy-network
+
   sygnal:
     image: matrixdotorg/sygnal:latest
-    container_name: letsyak-sygnal
+    container_name: ${TENANT_STACK_NAME:-letsyak}-sygnal
     restart: unless-stopped
     volumes:
       - ./sygnal:/sygnal
@@ -113,7 +131,7 @@ services:
 
   vault-api:
     build: ./vault-api
-    container_name: letsyak-vault-api
+    container_name: ${TENANT_STACK_NAME:-letsyak}-vault-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -138,7 +156,7 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: letsyak-minio
+    container_name: ${TENANT_STACK_NAME:-letsyak}-minio
     restart: unless-stopped
     command: server /data
     environment:
@@ -165,6 +183,7 @@ volumes:
 networks:
   letsyak-internal:
     driver: bridge
+    name: ${TENANT_STACK_NAME:-letsyak}-internal
   proxy-network:
     external: true
-    name: proxy-network
+    name: ${PROXY_NETWORK_NAME:-proxy-network}

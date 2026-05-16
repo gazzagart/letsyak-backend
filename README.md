@@ -21,6 +21,7 @@ Internal Docker network (not exposed):
   ├── Synapse (Matrix homeserver)  ── proxy-network + letsyak-internal
   ├── PostgreSQL 16                ── letsyak-internal
   ├── Redis 7                      ── letsyak-internal
+  ├── Control plane                 ── proxy-network
   └── Well-known (nginx)           ── proxy-network
 ```
 
@@ -30,6 +31,23 @@ Internal Docker network (not exposed):
 - Nginx Proxy Manager running on the `proxy-network` Docker network
 - Domain name with DNS control (Cloudflare)
 - Ports 3478, 5349, 49160-49200/udp open in firewall (80/443 already handled by NPM)
+
+### PowerShell checks on Apple Silicon macOS
+
+The PowerShell setup script can be syntax-checked locally on a Mac without a Windows machine:
+
+```bash
+bash scripts/check-setup-ps1.sh
+```
+
+The checker uses native `pwsh` when it is installed. On Apple Silicon, Homebrew installs a native macOS build. If `pwsh` is missing but Docker Desktop is running, the checker falls back to Microsoft's official amd64 PowerShell container through Docker Desktop emulation.
+
+To install native PowerShell instead of using Docker:
+
+```bash
+brew install --cask powershell
+pwsh -NoLogo -NoProfile
+```
 
 ---
 
@@ -51,6 +69,7 @@ This creates:
 - `.env` with auto-generated secrets and `localhost` domains
 - `synapse/homeserver.yaml` configured for `http://localhost:8008` with open registration
 - `docker-compose.override.yml` that exposes ports on `127.0.0.1` and disables coturn/sygnal/web
+- tenant stack metadata such as `TENANT_STACK_NAME`, local port variables, and the control-plane tenant config path
 
 ### 2. Add Firebase credentials (optional — only needed for push notifications)
 
@@ -70,6 +89,7 @@ docker compose up -d
 | Service | URL |
 |---|---|
 | Synapse (Matrix API) | http://localhost:8008 |
+| Control plane (workspace discovery) | http://localhost:8085 |
 | Well-known | http://localhost:8080 |
 | Vault API | http://localhost:8090 |
 | MinIO console | http://localhost:9001 |
@@ -87,6 +107,117 @@ Registration is open in local mode — you can create accounts directly from the
 ./scripts/create-user.sh alice 'password123'
 ./scripts/create-user.sh admin 'password123' --admin
 ```
+
+The local control plane serves workspace discovery from `control-plane/config/tenants.sample.json`:
+
+```bash
+curl 'http://localhost:8085/api/v1/workspaces/resolve?slug=local'
+curl 'http://localhost:8085/api/v1/workspaces/resolve?email=alice@example.com'
+```
+
+The response includes the workspace display name, Matrix homeserver URL, Vault API URL, branding, isolation tier, and security mode. It deliberately does not expose Synapse admin tokens or deployment secrets.
+
+### Local multi-tenant smoke test
+
+The Compose stack is parameterized so multiple isolated LetsYak tenant stacks can run on one Docker host. Each stack needs its own working directory or Compose project name, its own `TENANT_STACK_NAME`, and unique localhost ports.
+
+Example tenant env files live in `tenants/`:
+
+| Tenant | Matrix | Vault API | MinIO console | Workspace slug |
+|---|---|---|---|---|
+| `local-a` | `http://localhost:8008` | `http://localhost:8090` | `http://localhost:9001` | `local-a` |
+| `local-b` | `http://localhost:8108` | `http://localhost:8190` | `http://localhost:9101` | `local-b` |
+
+To create the first local tenant from a fresh checkout or copied directory:
+
+```bash
+set -a
+. ./tenants/local-a.env.example
+set +a
+./setup.sh --local
+docker compose -p letsyak-local-a up -d
+```
+
+To create the second local tenant, use a second copy of `letsyak-server/` so generated Synapse config and media files are isolated, then run:
+
+```bash
+set -a
+. ./tenants/local-b.env.example
+set +a
+./setup.sh --local
+docker compose -p letsyak-local-b up -d
+```
+
+For app workspace switching, point the app at one shared control-plane config that contains both tenants. The sample file `control-plane/config/tenants.local-multi.sample.json` resolves both `local-a` and `local-b`.
+
+```bash
+curl 'http://localhost:8085/api/v1/workspaces/resolve?slug=local-a'
+curl 'http://localhost:8085/api/v1/workspaces/resolve?slug=local-b'
+```
+
+This local smoke setup deliberately keeps each tenant's Matrix, Vault API, Postgres, Redis, and MinIO data isolated. The control-plane is the shared discovery layer.
+
+For production-style local testing, run the discovery layer as its own Compose project and run tenant stacks with their bundled control-plane disabled:
+
+```bash
+# Shared workspace discovery / tenant router
+docker network create letsyak-control-plane-local 2>/dev/null || true
+PROXY_NETWORK_NAME=letsyak-control-plane-local \
+CONTROL_PLANE_TENANT_CONFIG=./control-plane/config/tenants.local-multi.sample.json \
+docker compose -f docker-compose.control-plane.yml -p letsyak-control-plane up -d --build
+
+# Tenant data plane, from each tenant directory after setup.sh has generated config
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.override.yml \
+  -f docker-compose.tenant-data-plane.yml \
+  -p letsyak-local-a \
+  up -d --build
+```
+
+To run the automated two-tenant smoke test on macOS/Linux:
+
+```bash
+./scripts/smoke-two-tenants.sh
+```
+
+The smoke test uses high localhost ports by default so it does not collide with the normal local stack. It creates temporary directories, starts one shared control-plane project plus two tenant data-plane projects, checks Synapse/Vault/MinIO/control-plane routing, creates one Matrix user in each tenant, verifies each user's Vault access, and verifies a tenant A Matrix token is rejected by tenant B Vault.
+
+The smoke stacks are removed automatically. To keep them for manual browser testing:
+
+```bash
+KEEP_LETSYAK_SMOKE=1 ./scripts/smoke-two-tenants.sh
+```
+
+With the default smoke ports, tenant A is available at `http://localhost:18008` and tenant B at `http://localhost:18108`.
+
+The Flutter web smoke test lives in `mayberychat/scripts/smoke-web-two-tenants.sh`. It starts the backend smoke stacks, runs a Chrome test from the browser runtime, and then cleans everything up:
+
+```bash
+cd ../mayberychat
+./scripts/smoke-web-two-tenants.sh
+```
+
+Use `KEEP_LETSYAK_WEB_SMOKE=1` to leave the backend stacks running for manual browser checks.
+
+For real-device testing on the same Wi-Fi network, bind the smoke services to all interfaces and publish your Mac's LAN IP in workspace discovery:
+
+```bash
+LAN_IP=$(ipconfig getifaddr en0)
+KEEP_LETSYAK_SMOKE=1 \
+LETSYAK_SMOKE_BIND_ADDRESS=0.0.0.0 \
+LETSYAK_SMOKE_PUBLIC_HOST="$LAN_IP" \
+./scripts/smoke-two-tenants.sh
+```
+
+Then use these URLs from the device browser or app:
+
+| Tenant | Matrix | Control plane | Vault API |
+|---|---|---|---|
+| `local-a` | `http://$LAN_IP:18008` | `http://$LAN_IP:18085` | `http://$LAN_IP:18090` |
+| `local-b` | `http://$LAN_IP:18108` | `http://$LAN_IP:18085` | `http://$LAN_IP:18190` |
+
+For Flutter web on a real device, run the app with a LAN-visible web server and make `web/config.json` point `controlPlaneBaseUrl` at the LAN control-plane URL before serving the build.
 
 ### Resetting local state
 
@@ -167,7 +298,7 @@ Add a custom location for well-known:
 
 Paste this nginx config:
 ```nginx
-client_max_body_size 100M;
+client_max_body_size 50M;
 proxy_http_version 1.1;
 proxy_read_timeout 600s;
 proxy_send_timeout 600s;
@@ -175,6 +306,8 @@ proxy_set_header X-Forwarded-Proto $scheme;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header Host $host;
 ```
+
+The launch chat-media policy is a single global Synapse upload limit of `50M` via `max_upload_size`. Keep NPM's `client_max_body_size` at the same value or higher so the reverse proxy does not reject valid Synapse uploads before Synapse can return a Matrix error. Larger durable file sharing should go through Vault rather than normal chat uploads.
 
 ### 5. Verify DNS
 
@@ -246,9 +379,34 @@ C:\docker\letsyak-widgets\     → chat.widgets.letsyak.com
 C:\docker\letsyak-server\      → chat.maybery.app (your own)
 ```
 
-Each needs unique container names and a separate postgres volume. The existing
-`docker-compose.yml` uses fixed container names — duplicate the directory and
-edit the container names (or parameterize via `COMPOSE_PROJECT_NAME` in `.env`).
+Each tenant needs a unique `TENANT_STACK_NAME`, unique public domains, and isolated generated config/secrets. `docker-compose.yml` prefixes container names and internal Docker networks from `TENANT_STACK_NAME`, while Compose project names keep named volumes isolated.
+
+The preferred shared-host shape is one shared control-plane Compose project plus many tenant data-plane Compose projects.
+
+Recommended shared-host pattern:
+
+```bash
+# Shared workspace discovery / tenant router
+CONTROL_PLANE_TENANT_CONFIG=./control-plane/config/tenants.production.json \
+docker compose -f docker-compose.control-plane.yml -p letsyak-control-plane up -d --build
+
+# Tenant data planes
+TENANT_STACK_NAME=letsyak-acme ./setup.sh
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.tenant-data-plane.yml \
+  -p letsyak-acme \
+  up -d --build
+
+TENANT_STACK_NAME=letsyak-widgets ./setup.sh
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.tenant-data-plane.yml \
+  -p letsyak-widgets \
+  up -d --build
+```
+
+In Nginx Proxy Manager, forward the control-plane hostname to `letsyak-control-plane:8085`. Forward tenant hostnames to the tenant-prefixed container names, for example `letsyak-acme-synapse:8008`, `letsyak-acme-well-known:80`, and `letsyak-acme-vault-api:8090`.
 
 > **Note:** Coturn ports (3478, 5349) can only bind once. Multiple clients sharing
 > a server should share a single coturn instance with the same TURN secret
@@ -286,8 +444,18 @@ docker compose logs -f well-known
 
 ### Restart a service
 ```powershell
-docker compose restart letsyak-synapse
+docker compose restart synapse
 ```
+
+### Adjust chat media upload limit
+
+Normal chat attachments use Synapse media, not Vault. The launch limit is global for all clients and platforms:
+
+```yaml
+max_upload_size: 50M
+```
+
+If this changes, update `synapse/homeserver.yaml`, keep the NPM `client_max_body_size` at the same value or higher, and restart Synapse with `docker compose restart synapse`. Web, iOS, and Android clients all inherit the same server-side Matrix upload policy.
 
 ### Update images
 ```powershell

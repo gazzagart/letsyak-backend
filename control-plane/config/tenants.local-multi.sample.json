@@ -1,0 +1,50 @@
+{
+  "workspaces": [
+    {
+      "id": "local-a",
+      "slug": "local-a",
+      "display_name": "LetsYak Local A",
+      "status": "active",
+      "email_domains": ["a.example.com", "local-a.letsyak.test"],
+      "homeserver_url": "http://localhost:8008",
+      "vault_api_url": "http://localhost:8090",
+      "isolation_tier": "dedicated",
+      "security_mode": "easy_e2ee",
+      "login_methods": ["password"],
+      "branding": {
+        "logo_url": "",
+        "primary_color": "#5625BA",
+        "secondary_color": "#41A2BC",
+        "support_url": "https://letsyak.com/help",
+        "privacy_url": "https://letsyak.com/privacy"
+      },
+      "features": {
+        "vault": true,
+        "organisation_admin": true
+      }
+    },
+    {
+      "id": "local-b",
+      "slug": "local-b",
+      "display_name": "LetsYak Local B",
+      "status": "active",
+      "email_domains": ["b.example.com", "local-b.letsyak.test"],
+      "homeserver_url": "http://localhost:8108",
+      "vault_api_url": "http://localhost:8190",
+      "isolation_tier": "dedicated",
+      "security_mode": "strict",
+      "login_methods": ["password"],
+      "branding": {
+        "logo_url": "",
+        "primary_color": "#0F766E",
+        "secondary_color": "#F59E0B",
+        "support_url": "https://letsyak.com/help",
+        "privacy_url": "https://letsyak.com/privacy"
+      },
+      "features": {
+        "vault": true,
+        "organisation_admin": true
+      }
+    }
+  ]
+}

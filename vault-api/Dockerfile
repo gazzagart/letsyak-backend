@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.24-alpine3.22 AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /vault-api ./cmd/server
 
-FROM alpine:3.21
+FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /vault-api /vault-api
 

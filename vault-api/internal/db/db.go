@@ -133,7 +133,67 @@ func (d *Database) Migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_shares_target ON vault_shares(target_id) WHERE NOT is_revoked;
 		CREATE INDEX IF NOT EXISTS idx_shares_owner ON vault_shares(owner_user_id);
-	`, FreeQuotaBytes, TierFree))
+
+		CREATE TABLE IF NOT EXISTS organisations (
+			id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			name                 TEXT NOT NULL,
+			slug                 TEXT NOT NULL UNIQUE,
+			owner_user_id        TEXT NOT NULL REFERENCES vault_users(matrix_user_id),
+			storage_plan         TEXT NOT NULL DEFAULT 'manual',
+			seat_limit           INT NOT NULL DEFAULT 1 CHECK (seat_limit >= 0),
+			storage_quota_bytes  BIGINT NOT NULL DEFAULT 0,
+			created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS organisation_members (
+			org_id          UUID NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+			matrix_user_id  TEXT NOT NULL REFERENCES vault_users(matrix_user_id),
+			role            TEXT NOT NULL,
+			status          TEXT NOT NULL DEFAULT 'active',
+			assigned_tier   TEXT NOT NULL DEFAULT '%s',
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			removed_at      TIMESTAMPTZ,
+			PRIMARY KEY (org_id, matrix_user_id),
+			CHECK (role IN ('owner', 'admin', 'member')),
+			CHECK (status IN ('active', 'removed')),
+			CHECK (assigned_tier IN ('free', 'plus'))
+		);
+
+		CREATE TABLE IF NOT EXISTS organisation_invites (
+			id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			org_id             UUID NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+			matrix_user_id     TEXT,
+			email              TEXT,
+			role               TEXT NOT NULL DEFAULT 'member',
+			assigned_tier      TEXT NOT NULL DEFAULT '%s',
+			status             TEXT NOT NULL DEFAULT 'pending',
+			token_hash         TEXT,
+			expires_at         TIMESTAMPTZ,
+			accepted_at        TIMESTAMPTZ,
+			revoked_at         TIMESTAMPTZ,
+			created_by         TEXT NOT NULL REFERENCES vault_users(matrix_user_id),
+			created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CHECK (role IN ('owner', 'admin', 'member')),
+			CHECK (assigned_tier IN ('free', 'plus')),
+			CHECK (status IN ('pending', 'accepted', 'revoked'))
+		);
+
+		CREATE TABLE IF NOT EXISTS organisation_audit_log (
+			id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			org_id          UUID NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+			actor_user_id   TEXT NOT NULL,
+			action          TEXT NOT NULL,
+			target_user_id  TEXT,
+			metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_org_members_user ON organisation_members(matrix_user_id) WHERE status = 'active';
+		CREATE INDEX IF NOT EXISTS idx_org_members_org ON organisation_members(org_id) WHERE status = 'active';
+		CREATE INDEX IF NOT EXISTS idx_org_invites_org ON organisation_invites(org_id);
+		CREATE INDEX IF NOT EXISTS idx_org_audit_org ON organisation_audit_log(org_id, created_at DESC);
+	`, FreeQuotaBytes, TierFree, TierFree, TierFree))
 	return err
 }
 

@@ -1,0 +1,8 @@
+# =============================================================================
+#  LetsYak Tenant Data Plane Override
+#  Use with docker-compose.yml when a shared control-plane project is running.
+# =============================================================================
+
+services:
+  control-plane:
+    profiles: ["shared-control-plane-disabled"]
